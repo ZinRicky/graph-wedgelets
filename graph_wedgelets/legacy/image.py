@@ -1,54 +1,175 @@
-# Operative imports
 import numpy as np
 from PIL import Image
-import copy
-from tqdm import tqdm
 
-# Type annotations
-from numpy.typing import NDArray
+import numpy.typing as npt
+from typing import Any
+from collections.abc import Iterable
 
 
-class Nodes:
-    def __init__(self, nodes):
-        if isinstance(nodes, np.ndarray) and np.ndim(nodes) == 2:
-            self.nodes = copy.deepcopy(nodes)
+class GridNodes:
+    def __init__(self, width: int, height: int):
+        self.width: int = width
+        self.height: int = height
+
+    def __getitem__(self, index: int | slice):
+        if isinstance(index, int):
+            if index >= self.width * self.height:
+                raise IndexError(
+                    f"Index {index} out of bounds (there are only {self.width * self.height} pixels)."
+                )
+            if index < 0:
+                raise IndexError(
+                    "Please provide non-negative a non-negative integer as grid index."
+                )
+            return list(divmod(index, self.width))[::-1]
+        elif isinstance(index, slice):
+            if (index.step is not None) and (index.step <= 0):
+                raise ValueError("Backwards slicing is not supported.")
+            start: int = 0 if index.start is None else max([0, index.start])
+            stop: int = (
+                self.width * self.height
+                if index.stop is None
+                else min([self.width * self.height, index.stop])
+            )
+            step: int = 1 if index.step is None else index.step
+            return [list(divmod(x, self.width))[::-1] for x in range(start, stop, step)]
         else:
-            self.nodes = np.vstack(nodes)
+            raise TypeError("Incorrect index specification.")
 
-
-def _distcenter(
-    nodes: Nodes,
-    center_index: int,
-    ord: float | None = None,
-) -> NDArray:
-    if (ord is not None) and (not isinstance(ord, float) or ord <= 0):
-        raise ValueError(
-            f"'ord' must be either a positive number or inf; got {ord} instead."
+    def __iter__(self):
+        yield from (
+            list(divmod(index, self.width))[::-1]
+            for index in range(self.width * self.height)
         )
-    packed_nodes = nodes.nodes
-    center = np.tile(packed_nodes[center_index], (packed_nodes.shape[0], 1))
-    return np.linalg.norm(packed_nodes - center, ord=ord, axis=1)
+
+    def __repr__(self):
+        return f"GridNodes(width={self.width}, height={self.height})"
 
 
-def to_signal(image: Image.Image) -> tuple[Nodes, NDArray, int, int]:
+class BinaryWedgeParitioningTree:
+    def __init__(
+        self,
+        nodes: GridNodes,
+        signal: npt.NDArray,
+        n_blocks: int | Iterable[int] | None,
+    ) -> None:
+        self.nodes = nodes
+
+        n_blocks_horizontal: int
+        n_blocks_vertical: int
+        if n_blocks is None:
+            n_blocks_horizontal = n_blocks_vertical = 1
+        elif isinstance(n_blocks, int):
+            n_blocks_horizontal = n_blocks_vertical = n_blocks
+        elif isinstance(n_blocks, Iterable):
+            n_blocks_horizontal, n_blocks_vertical = n_blocks
+        else:
+            raise TypeError(
+                "Incorrect format for 'n_blocks'. Only None, integers and couples are supported."
+            )
+        self.partition_size: int = n_blocks_horizontal * n_blocks_vertical
+
+        block_horizontal_size: int = int(
+            np.ceil(self.nodes.width / n_blocks_horizontal)
+        )
+        block_vertical_size: int = int(np.ceil(self.nodes.height / n_blocks_vertical))
+
+        centers: npt.NDArray[np.int64] = (
+            np.minimum(
+                np.array(
+                    [
+                        np.tile(
+                            np.floor(block_horizontal_size / 2)
+                            + block_horizontal_size * np.arange(n_blocks_horizontal),
+                            (n_blocks_vertical, 1),
+                        ),
+                        np.tile(
+                            np.floor(block_vertical_size / 2)
+                            + block_vertical_size * np.arange(n_blocks_vertical),
+                            (n_blocks_horizontal, 1),
+                        ).T,
+                    ]
+                ),
+                np.array(
+                    [
+                        np.full(
+                            (n_blocks_vertical, n_blocks_horizontal),
+                            self.nodes.width - 1,
+                        ),
+                        np.full(
+                            (n_blocks_vertical, n_blocks_horizontal),
+                            self.nodes.height - 1,
+                        ),
+                    ]
+                ),
+            )
+            .T.reshape((-1, 2))
+            .astype(np.int64)
+        )
+
+        self.center_nodes: list[int] = (
+            (centers @ np.array([1, self.nodes.width], dtype=np.int64))
+            .flatten()
+            .tolist()
+        )
+        self.center_nodes.sort()
+
+        self.partition: list[list[int]] = [
+            [
+                center + offest_hor + self.nodes.width * offset_ver
+                for offset_ver in range(
+                    -int(np.floor(block_vertical_size / 2)),
+                    int(np.floor(block_vertical_size / 2)) + 1,
+                )
+                for offest_hor in range(
+                    -int(np.floor(block_horizontal_size / 2)),
+                    int(np.floor(block_horizontal_size / 2)) + 1,
+                )
+                if 0
+                <= center + offest_hor + self.nodes.width * offset_ver
+                < self.nodes.width * self.nodes.height
+            ]
+            for center in self.center_nodes
+        ]
+
+        self.mean_signal: npt.NDArray = np.array(
+            [signal[block].mean(axis=0) for block in self.partition]
+        )
+
+        self.wavelet_coefficients: list[npt.NDArray] = [
+            np.vstack((block, np.zeros_like(block))) for block in self.mean_signal
+        ]
+
+        self.block_sizes: list[int] = [len(x) for x in self.partition]
+
+        self.error: list[np.floating[Any]] = [
+            np.linalg.norm(
+                signal[block] - np.tile(self.mean_signal[i], (len(block), 1))
+            )
+            ** 2
+            / (self.nodes.height * self.nodes.width)
+            / signal.shape[1]
+            for i, block in enumerate(self.partition)
+        ]
+
+
+def to_signal(image: Image.Image) -> tuple[GridNodes, npt.NDArray, int, int]:
     img_array: np.ndarray = np.asarray(image)
     dims: int = np.ndim(img_array)
 
     if dims == 2:
         return (
-            Nodes(
-                np.indices((img_array.shape[1], img_array.shape[0])).T.reshape(-1, 2)
-            ),
+            GridNodes(img_array.shape[1], img_array.shape[0]),
             img_array.flatten(order="F"),
             img_array.shape[1],
             img_array.shape[0],
         )
-    if dims == 3:
+    elif dims == 3:
         indices: np.ndarray = np.indices(
             (img_array.shape[1], img_array.shape[0])
         ).T.reshape(-1, 2)
         return (
-            Nodes(indices),
+            GridNodes(img_array.shape[1], img_array.shape[0]),
             img_array[indices.T[1], indices.T[0], :],
             img_array.shape[1],
             img_array.shape[0],
@@ -56,86 +177,40 @@ def to_signal(image: Image.Image) -> tuple[Nodes, NDArray, int, int]:
     raise ValueError("Unsupported image format.")
 
 
-class BinaryWedgeParitioningTree:
-    def __init__(
-        self,
-        nodes: Nodes,
-        signal: NDArray,
-        width: int,
-        height: int,
-        n_blocks_hor: int,
-        n_blocks_ver: int,
-        max_partition_size: int,
-    ):
-        self.nodes = copy.deepcopy(nodes.nodes)
-        self.center_nodes: NDArray = np.zeros((max_partition_size, 2))
-        self.signal: NDArray = np.zeros((max_partition_size, signal.shape[1]))
-        self.wavelet_coefficients: NDArray = np.zeros(
-            (max_partition_size, signal.shape[1], 2)
-        )
-        self.block_sizes: NDArray = np.zeros((max_partition_size, 2))
-        self.error: NDArray = np.zeros(max_partition_size)
-        self.partitions: list[NDArray] = []
-        self.partition_size = n_blocks_hor * n_blocks_ver
-
-        n_pixels = width * height
-        block_width = np.ceil(width / n_blocks_hor)
-        block_height = np.ceil(height / n_blocks_ver)
-        nodes_x = self.nodes[:, 0]
-        nodes_y = self.nodes[:, 1]
-
-        try:
-            for i in range(n_blocks_hor):
-                for j in range(n_blocks_ver):
-                    self.center_nodes[i * n_blocks_hor + j, 0] = np.nonzero(
-                        (nodes_x == np.min(np.ceil(block_width / 2) + i * block_width))
-                        & (
-                            nodes_y
-                            == np.min(np.ceil(block_height / 2) + i * block_height)
-                        )
-                    )[0].tolist()[0]
-
-                    self.partitions.append(
-                        np.nonzero(
-                            (nodes_x < (i + 1) * block_width)
-                            & (nodes_x >= i * block_width)
-                            & (nodes_y < (j + 1) * block_height)
-                            & (nodes_y >= j * block_height)
-                        )[0]
-                    )
-        except IndexError:
-            raise ValueError(
-                f"Exceeded maximum partition size of {max_partition_size} during BWP tree initialisation."
-            )
-
-        for block in range(self.partition_size):
-            self.signal[block] = np.mean(signal[self.partitions[block]], axis=0)
-            self.wavelet_coefficients[block, :, 0] = self.signal[block].copy()
-            self.block_sizes[block, 0] = self.partitions[block].shape[0]
-            self.error[block] = (
-                np.linalg.norm(
-                    signal[self.partitions[block]]
-                    - np.tile(self.signal[block], (self.partitions[block].shape[0], 1)),
-                    "fro",
-                )
-                ** 2
-                / n_pixels
-                / signal.shape[1]
-            )
+def from_signal(signal: npt.NDArray, width: int, height: int) -> npt.NDArray:
+    if signal.ndim == 1:
+        return signal.reshape((height, width))
+    elif signal.ndim == 2:
+        return signal.reshape((height, width, signal.shape[1]))
+    raise ValueError(
+        f"The signal has an unforseen number of dimensions ({signal.ndim} ∉ {{1, 2}})."
+    )
 
 
-def _main() -> None:
-    with Image.open("tests/test-tr-col.png") as im:
-        V, f, dim_x, dim_y = to_signal(im)
-
-    J_x, J_y = 5, 5
-    tol = 1e-3
-    metric = 2
-
-    BWP = BinaryWedgeParitioningTree(V, f, dim_x, dim_y, J_x, J_y, 1000)
-
-    print(BWP.error)
+def _main(test: int) -> None:
+    match test:
+        case 0:
+            with Image.open("tests/easy.bmp") as im:
+                arr = np.asarray(im)
+            print(arr)
+            Image.fromarray(arr).show()
+        case 1:
+            with Image.open("tests/easy.bmp") as im:
+                nodes, signal, w, h = to_signal(im)
+            Image.fromarray(from_signal(signal, w, h)).show()
+        case 2:
+            nodes = GridNodes(5, 4)
+            print(nodes)
+            print(nodes[2:10:2])
+        case 3:
+            nodes = GridNodes(5, 4)
+            for x in nodes:
+                print(x)
+        case 4:
+            with Image.open("tests/easy.bmp") as im:
+                nodes, signal, _, _ = to_signal(im)
+            BinaryWedgeParitioningTree(nodes, signal, (4, 3))
 
 
 if __name__ == "__main__":
-    _main()
+    _main(4)
