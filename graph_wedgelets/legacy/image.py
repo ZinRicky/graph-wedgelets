@@ -1,9 +1,6 @@
 import numpy as np
 from PIL import Image
 
-# from tqdm import tqdm
-# from time import perf_counter
-
 import numpy.typing as npt
 from typing import Any, Literal
 from collections.abc import Iterable
@@ -13,6 +10,7 @@ class NodesGrid:
     def __init__(self, width: int, height: int):
         self.width: int = width
         self.height: int = height
+        self.shape: tuple[int, int] = (self.width, self.height)
 
     def __getitem__(self, index: int | slice):
         if isinstance(index, int):
@@ -49,6 +47,9 @@ class NodesGrid:
     def coordinates_from_indices(self, indices: list[int]) -> npt.NDArray:
         return np.array([self[x] for x in indices])
 
+    def asarray(self) -> npt.NDArray:
+        return np.array([node for node in self])
+
 
 class BinaryWedgeParitioningTree:
     def __init__(
@@ -56,9 +57,11 @@ class BinaryWedgeParitioningTree:
         nodes: NodesGrid,
         signal: npt.NDArray,
         n_blocks: int | Iterable[int] | None,
+        max_partition_size: int,
     ) -> None:
         self.nodes: NodesGrid = nodes
         self.signal: npt.NDArray = signal
+        self.max_partition_size: int = max_partition_size
 
         n_blocks_horizontal: int
         n_blocks_vertical: int
@@ -66,7 +69,7 @@ class BinaryWedgeParitioningTree:
             n_blocks_horizontal = n_blocks_vertical = 1
         elif isinstance(n_blocks, int):
             n_blocks_horizontal = n_blocks_vertical = n_blocks
-        elif isinstance(n_blocks, Iterable):
+        elif isinstance(n_blocks, Iterable) and len(list(n_blocks)) == 2:
             n_blocks_horizontal, n_blocks_vertical = n_blocks
         else:
             raise TypeError(
@@ -119,43 +122,49 @@ class BinaryWedgeParitioningTree:
         )
         self.center_nodes.sort()
 
-        self.partition: list[list[int]] = [
-            [
-                center + offest_hor + self.nodes.width * offset_ver
-                for offset_ver in range(
+        self.partition: dict[int, list[int]] = {
+            i: [
+                center + horizontal_offest + self.nodes.width * vertical_offset
+                for vertical_offset in range(
                     -int(np.floor(block_vertical_size / 2)),
                     int(np.floor(block_vertical_size / 2)) + 1,
                 )
-                for offest_hor in range(
+                for horizontal_offest in range(
                     -int(np.floor(block_horizontal_size / 2)),
                     int(np.floor(block_horizontal_size / 2)) + 1,
                 )
                 if 0
-                <= center + offest_hor + self.nodes.width * offset_ver
+                <= center + horizontal_offest + self.nodes.width * vertical_offset
                 < self.nodes.width * self.nodes.height
             ]
-            for center in self.center_nodes
-        ]
+            for i, center in enumerate(self.center_nodes)
+        }
 
-        self.mean_signal: npt.NDArray = np.array(
-            [self.signal[block].mean(axis=0) for block in self.partition]
+        self.mean_signal: npt.NDArray = np.zeros(
+            (self.max_partition_size, self.signal.shape[1])
         )
+        for i, block in self.partition.items():
+            self.mean_signal[i] = self.signal[block].mean(axis=0)
 
-        self.wavelet_coefficients: list[npt.NDArray] = [
-            np.vstack((block, np.zeros_like(block))) for block in self.mean_signal
-        ]
+        self.wavelet_coefficients: npt.NDArray = np.zeros(
+            (self.max_partition_size, self.signal.shape[1], 2)
+        )
+        for i, block in self.partition.items():
+            self.wavelet_coefficients[i, :, 0] = self.mean_signal[i]
 
-        self.block_sizes: list[list[int]] = [[len(x), 0] for x in self.partition]
+        self.block_sizes: dict[int, list[int]] = {
+            key: [len(block), 0] for key, block in self.partition.items()
+        }
 
-        self.error: list[np.floating] = [
-            np.linalg.norm(
+        self.error: dict[int, np.floating] = {
+            i: np.linalg.norm(
                 self.signal[block] - np.tile(self.mean_signal[i], (len(block), 1))
             )
             ** 2
             / (self.nodes.height * self.nodes.width)
             / self.signal.shape[1]
-            for i, block in enumerate(self.partition)
-        ]
+            for i, block in self.partition.items()
+        }
 
     def wedgelet_encode(
         self,
@@ -163,73 +172,84 @@ class BinaryWedgeParitioningTree:
         method_parameter: int | None = None,
         tolerance: float = 1e-3,
         metric: float | None = None,
-        max_partition_size: int = 1000,
-    ):
-        max_error_index: np.integer = np.argmax(self.error)
-        max_error: np.floating = self.error[max_error_index]
+    ) -> None:
+        max_error: np.floating = np.max(list(self.error.values()))
+        max_error_index: int = list(self.error.keys())[
+            list(self.error.values()).index(max_error)
+        ]
 
         signal_size: int = self.signal.shape[0]
-        new_center_nodes: list[np.integer] = []
 
         while max_error > tolerance and (
-            max_partition_size is None or self.partition_size < max_partition_size
+            self.max_partition_size is None
+            or self.partition_size < self.max_partition_size
         ):
-            new_center_nodes.append(max_error_index)
+            center_node: int = self.center_nodes[max_error_index]
             current_mean_signal: npt.NDArray = self.mean_signal[max_error_index]
             current_partition: list[int] = self.partition[max_error_index]
-            center_index: int = current_partition.index(
-                self.center_nodes[max_error_index]
-            )
+            center_index: int = current_partition.index(center_node)
 
             if method is None:
                 method = "RA"
 
             S: int
-            signal_range: npt.NDArray
+            new_node_range: npt.NDArray
 
             match method:
                 case "FA":
                     S = len(current_partition)
-                    signal_range = np.arange(S)
+                    new_node_range = np.arange(S)
                 case "MD":
                     S = 1
-                    signal_range = np.argmax(
+                    new_node_range = np.argmax(
                         center_distance(
                             self.nodes.coordinates_from_indices(current_partition),
                             center_index,
                             metric,
                         ),
                         axis=0,
+                        keepdims=True,
                     )
                 case "KC":
-                    if method_parameter is None:
-                        method_parameter = 2
-                    S = min([method_parameter, len(current_partition)])
-                    _, signal_range = j_centers(
-                        self.nodes.coordinates_from_indices(current_partition),
-                        method_parameter,
-                        metric=metric,
-                    )
+                    raise NotImplementedError()
+                    # if method_parameter is None:
+                    #     method_parameter = 2
+                    # S = min([method_parameter, len(current_partition)])
+                    # _, signal_range = j_centers(
+                    #     self.nodes.coordinates_from_indices(current_partition),
+                    #     method_parameter,
+                    #     metric=metric,
+                    # )
                 case "RA":
                     rng = np.random.default_rng(seed=1)
                     if method_parameter is None:
                         method_parameter = 2
                     S = min([method_parameter, len(current_partition)])
-                    signal_range = rng.integers(len(current_partition), size=S)
+                    new_node_range = rng.choice(
+                        current_partition,
+                        size=S,
+                        replace=False,
+                    )
 
-            for i in tqdm(range(S)):
+            for possible_node in new_node_range:
                 cluster_1: list[int]
                 cluster_2: list[int]
 
                 cluster_1, cluster_2 = wedge_split(
-                    self.nodes, current_partition, signal_range[i], center_index, metric
+                    self.nodes,
+                    current_partition,
+                    int(possible_node),
+                    center_node,
+                    metric,
                 )
+
                 error_1: np.floating = (
                     (
                         np.linalg.norm(
                             self.signal[cluster_1]
                             - np.tile(
-                                np.mean(self.signal[cluster_1]), (len(cluster_1), 1)
+                                np.mean(self.signal[cluster_1], axis=0),
+                                (len(cluster_1), 1),
                             )
                         )
                         ** 2
@@ -242,7 +262,8 @@ class BinaryWedgeParitioningTree:
                         np.linalg.norm(
                             self.signal[cluster_2]
                             - np.tile(
-                                np.mean(self.signal[cluster_2]), (len(cluster_2), 1)
+                                np.mean(self.signal[cluster_2], axis=0),
+                                (len(cluster_2), 1),
                             )
                         )
                         ** 2
@@ -253,34 +274,48 @@ class BinaryWedgeParitioningTree:
                 error_new: np.floating = error_1 + error_2
 
                 if error_new <= max_error:
-                    self.center_nodes[max_error_index] = current_partition[center_index]
-                    self.center_nodes.append(current_partition[signal_range[i]])
+                    if len(self.center_nodes) == self.partition_size + 1:
+                        self.center_nodes[-1] = int(possible_node)
+                    else:
+                        self.center_nodes.append(int(possible_node))
 
                     self.partition[max_error_index] = cluster_1
-                    self.partition.append(cluster_2)
+
+                    self.partition[self.partition_size] = cluster_2
+
                     self.mean_signal[max_error_index] = np.mean(
                         self.signal[cluster_1], axis=0
                     )
-                    self.mean_signal = np.vstack(
-                        (self.mean_signal, np.mean(self.signal[cluster_2], axis=0))
+                    self.mean_signal[self.partition_size] = np.mean(
+                        self.signal[cluster_2], axis=0
                     )
-                    self.wavelet_coefficients.append(
-                        np.vstack(
-                            (
-                                self.mean_signal[max_error_index] - current_mean_signal,
-                                self.mean_signal[-1] - current_mean_signal,
-                            )
-                        )
+
+                    self.wavelet_coefficients[self.partition_size, :, 0] = (
+                        self.mean_signal[max_error_index] - current_mean_signal
                     )
-                    self.block_sizes.append([len(cluster_1), len(cluster_2)])
+                    self.wavelet_coefficients[self.partition_size, :, 1] = (
+                        self.mean_signal[self.partition_size] - current_mean_signal
+                    )
+
+                    self.block_sizes[self.partition_size] = [
+                        len(cluster_1),
+                        len(cluster_2),
+                    ]
+
                     self.error[max_error_index] = error_1
-                    self.error.append(error_2)
+                    self.error[self.partition_size] = error_2
                     max_error = error_new
 
-            max_error_index = np.argmax(self.error)
-            max_error = self.error[max_error_index]
+            max_error = np.max(list(self.error.values()))
+            max_error_index = list(self.error.keys())[
+                list(self.error.values()).index(max_error)
+            ]
 
             self.partition_size += 1
+
+        if self.partition_size < self.max_partition_size:
+            self.mean_signal = self.mean_signal[: self.partition_size]
+            self.wavelet_coefficients = self.wavelet_coefficients[: self.partition_size]
 
 
 def center_distance(
@@ -289,7 +324,7 @@ def center_distance(
     metric: float | None = None,
 ) -> npt.NDArray:
     return np.linalg.norm(
-        coords - np.tile(coords[center_index], (len(coords), 1)),
+        coords - np.tile(coords[center_index], (coords.shape[0], 1)),
         ord=metric,
         axis=1,
     )
@@ -337,7 +372,7 @@ def wedge_split(
     center_2: int,
     metric: float | None = None,
 ) -> tuple[list[int], list[int]]:
-    node_coords: npt.NDArray = np.array([node for node in nodes])
+    node_coords: npt.NDArray = nodes.asarray()
     c_1: npt.NDArray[np.integer] = np.argmin(
         np.vstack(
             (
@@ -347,7 +382,9 @@ def wedge_split(
         ),
         axis=0,
     )
-    return np.nonzero(c_1)[0].tolist(), np.nonzero(1 - c_1)[0].tolist()
+    return [int(x) for x in np.nonzero(c_1)[0] if x in indices], [
+        int(x) for x in np.nonzero(1 - c_1)[0] if x in indices
+    ]
 
 
 def to_signal(image: Image.Image) -> tuple[NodesGrid, npt.NDArray, int, int]:
@@ -409,7 +446,7 @@ def _main(test: int) -> None:
         case 4:
             with Image.open("tests/easy.bmp") as im:
                 nodes, signal, _, _ = to_signal(im)
-            BinaryWedgeParitioningTree(nodes, signal, (4, 3))
+            BinaryWedgeParitioningTree(nodes, signal, (4, 3), 10)
         case 5:
             print(
                 center_distance(
@@ -417,12 +454,16 @@ def _main(test: int) -> None:
                 )
             )
         case 6:
-            print(wedge_split(NodesGrid(5, 6), [3, 5, 7], 10, 14))
+            print(wedge_split(NodesGrid(4, 4), [0, 1, 2, 3, 5, 6, 12, 13], 5, 6))
         case 7:
-            with Image.open("tests/church.jpg") as im:
-                nodes, signal, _, _ = to_signal(im)
-            BWP = BinaryWedgeParitioningTree(nodes, signal, (4, 3))
-            BWP.wedgelet_encode(max_partition_size=200)
+            with Image.open("tests/easy.bmp") as im:
+                nodes, signal, width, height = to_signal(im)
+            BWP = BinaryWedgeParitioningTree(nodes, signal, (2, 2), 20)
+            BWP.wedgelet_encode()
+
+            # print(BWP.__dict__)
+
+            # Image.fromarray(from_signal(BWP.mean_signal, 4, 3), mode="RGB").show()
 
 
 if __name__ == "__main__":
