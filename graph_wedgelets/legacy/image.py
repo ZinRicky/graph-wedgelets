@@ -1,6 +1,10 @@
 import numpy as np
 from PIL import Image
 
+from tqdm import tqdm
+import json
+import time
+
 import numpy.typing as npt
 from typing import Any, Literal
 from collections.abc import Iterable
@@ -11,6 +15,7 @@ class NodesGrid:
         self.width: int = width
         self.height: int = height
         self.shape: tuple[int, int] = (self.width, self.height)
+        self.array: npt.NDArray | None = None
 
     def __getitem__(self, index: int | slice):
         if isinstance(index, int):
@@ -45,10 +50,15 @@ class NodesGrid:
         return f"NodesGrid(width={self.width}, height={self.height})"
 
     def coordinates_from_indices(self, indices: list[int]) -> npt.NDArray:
-        return np.array([self[x] for x in indices])
+        return self.asarray()[indices]
 
     def asarray(self) -> npt.NDArray:
-        return np.array([node for node in self])
+        if self.array is None:
+            x: npt.NDArray[np.integer]
+            y: npt.NDArray[np.integer]
+            x, y = np.meshgrid(range(self.width), range(self.height))
+            return np.column_stack((x.ravel(), y.ravel()))
+        return self.array
 
 
 class BinaryWedgeParitioningTree:
@@ -224,7 +234,12 @@ class BinaryWedgeParitioningTree:
                     rng = np.random.default_rng(seed=1)
                     if method_parameter is None:
                         method_parameter = 2
-                    S = min([method_parameter, len(current_partition)])
+                    current_partition_size: int = len(current_partition)
+                    S = (
+                        method_parameter
+                        if method_parameter < current_partition_size
+                        else current_partition_size
+                    )
                     new_node_range = rng.choice(
                         current_partition,
                         size=S,
@@ -243,6 +258,7 @@ class BinaryWedgeParitioningTree:
                     metric,
                 )
 
+                t_0 = time.perf_counter()
                 error_1: np.floating = (
                     (
                         np.linalg.norm(
@@ -272,8 +288,10 @@ class BinaryWedgeParitioningTree:
                     / self.signal.shape[1]
                 )
                 error_new: np.floating = error_1 + error_2
+                t_1 = time.perf_counter()
 
                 if error_new <= max_error:
+                    t_0 = time.perf_counter()
                     if len(self.center_nodes) == self.partition_size + 1:
                         self.center_nodes[-1] = int(possible_node)
                     else:
@@ -301,21 +319,35 @@ class BinaryWedgeParitioningTree:
                         len(cluster_1),
                         len(cluster_2),
                     ]
+                    t_1 = time.perf_counter()
 
                     self.error[max_error_index] = error_1
                     self.error[self.partition_size] = error_2
                     max_error = error_new
 
+            t_0 = time.perf_counter()
             max_error = np.max(list(self.error.values()))
             max_error_index = list(self.error.keys())[
                 list(self.error.values()).index(max_error)
             ]
+            t_1 = time.perf_counter()
 
             self.partition_size += 1
 
         if self.partition_size < self.max_partition_size:
             self.mean_signal = self.mean_signal[: self.partition_size]
             self.wavelet_coefficients = self.wavelet_coefficients[: self.partition_size]
+
+    def wedgelet_decode(
+        self, metric: float | None = None
+    ) -> tuple[npt.NDArray, dict[int, list[int]]]:
+        new_signal: npt.NDArray = np.zeros_like(self.signal)
+        for i, center_node in enumerate(self.center_nodes):
+            new_signal[self.partition[i]] = self.mean_signal[i]
+        return (
+            new_signal,
+            {node: self.partition[i] for i, node in enumerate(self.center_nodes)},
+        )
 
 
 def center_distance(
@@ -382,9 +414,9 @@ def wedge_split(
         ),
         axis=0,
     )
-    return [int(x) for x in np.nonzero(c_1)[0] if x in indices], [
-        int(x) for x in np.nonzero(1 - c_1)[0] if x in indices
-    ]
+    c_2: npt.NDArray[np.integer] = np.zeros_like(c_1)
+    c_2[indices] = np.ones(len(indices))
+    return np.nonzero(c_1 * c_2)[0].tolist(), np.nonzero((1 - c_1) * c_2)[0].tolist()
 
 
 def to_signal(image: Image.Image) -> tuple[NodesGrid, npt.NDArray, int, int]:
@@ -460,11 +492,34 @@ def _main(test: int) -> None:
                 nodes, signal, width, height = to_signal(im)
             BWP = BinaryWedgeParitioningTree(nodes, signal, (2, 2), 20)
             BWP.wedgelet_encode()
-
-            # print(BWP.__dict__)
-
             # Image.fromarray(from_signal(BWP.mean_signal, 4, 3), mode="RGB").show()
+        case 8:
+            with Image.open("tests/church.jpg") as im:
+                nodes, signal, width, height = to_signal(im)
+
+            print("Starting signal translation")
+            t_0 = time.perf_counter()
+            BWP = BinaryWedgeParitioningTree(nodes, signal, 1, 50)
+            t_1 = time.perf_counter()
+            print(f"Initialization time: {t_1-t_0:.3e} s.\n")
+
+            print("Starting encoding")
+            t_0 = time.perf_counter()
+            BWP.wedgelet_encode(method_parameter=16)
+            t_1 = time.perf_counter()
+            print(f"Encoding time: {t_1-t_0:.3e} s.\n")
+
+            print("Starting decoding")
+            t_0 = time.perf_counter()
+            s, P = BWP.wedgelet_decode()
+            t_1 = time.perf_counter()
+            print(f"Decoding time: {t_1-t_0:.3e} s.\n")
+
+            Image.fromarray(from_signal(s, width, height), mode="RGB").show()
+            np.savez_compressed(
+                "test.npz", s=BWP.mean_signal, P=np.array(list(P.keys())), metric=2
+            )
 
 
 if __name__ == "__main__":
-    _main(7)
+    _main(8)
