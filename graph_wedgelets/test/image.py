@@ -6,7 +6,7 @@ import json
 import time
 
 import numpy.typing as npt
-from typing import Any, Literal
+from typing import Literal
 from collections.abc import Iterable
 
 
@@ -57,11 +57,11 @@ class NodesGrid:
             x: npt.NDArray[np.integer]
             y: npt.NDArray[np.integer]
             x, y = np.meshgrid(range(self.width), range(self.height))
-            return np.column_stack((x.ravel(), y.ravel()))
+            self.array = np.column_stack((x.ravel(), y.ravel()))
         return self.array
 
 
-class BinaryWedgeParitioningTree:
+class DebugBinaryWedgeParitioningTree:
     def __init__(
         self,
         nodes: NodesGrid,
@@ -196,9 +196,10 @@ class BinaryWedgeParitioningTree:
 
     def wedgelet_encode(
         self,
-        method: Literal["RA", "MD", "KC", "RA"] | None = None,
+        method: Literal["FA", "MD", "KC", "RA"] | None = None,
         method_parameter: int | None = None,
         tolerance: float = 1e-3,
+        max_partition_size: int | None = None,
         metric: float | None = None,
     ) -> None:
         max_error: np.floating = np.max(list(self.error.values()))
@@ -207,160 +208,210 @@ class BinaryWedgeParitioningTree:
         ]
 
         signal_size: int = self.signal.shape[0]
+        previous_max = None
+        previous_min = None
 
-        while max_error > tolerance and (
-            self.max_partition_size is None
-            or self.partition_size < self.max_partition_size
-        ):
-            center_node: int = self.center_nodes[max_error_index]
-            current_mean_signal: npt.NDArray = self.mean_signal[max_error_index]
-            current_partition: npt.NDArray[np.integer] = self.partition[max_error_index]
-            center_index: int = int(np.where(current_partition == center_node)[0][0])
-
-            if method is None:
-                method = "RA"
-
-            S: int
-            new_node_range: npt.NDArray
-
-            match method:
-                case "FA":
-                    S = len(current_partition)
-                    new_node_range = np.arange(S)
-                case "MD":
-                    S = 1
-                    new_node_range = np.argmax(
-                        center_distance(
-                            self.nodes.coordinates_from_indices(current_partition),
-                            center_index,
-                            metric,
+        with tqdm(
+            total=int(
+                np.min(
+                    [
+                        self.max_partition_size,
+                        (
+                            max_partition_size
+                            if max_partition_size is not None
+                            else np.inf
                         ),
-                        axis=0,
-                        keepdims=True,
-                    )
-                case "KC":
-                    raise NotImplementedError()
-                    # if method_parameter is None:
-                    #     method_parameter = 2
-                    # S = min([method_parameter, len(current_partition)])
-                    # _, signal_range = j_centers(
-                    #     self.nodes.coordinates_from_indices(current_partition),
-                    #     method_parameter,
-                    #     metric=metric,
-                    # )
-                case "RA":
-                    rng = np.random.default_rng(seed=1)
-                    if method_parameter is None:
-                        method_parameter = 2
-                    current_partition_size: int = len(current_partition)
-                    S = (
-                        method_parameter
-                        if method_parameter < current_partition_size
-                        else current_partition_size
-                    )
-                    new_node_range = rng.choice(
-                        current_partition,
-                        size=S,
-                        replace=False,
-                    )
-
-            for possible_node in new_node_range:
-                cluster_1: npt.NDArray[np.integer]
-                cluster_2: npt.NDArray[np.integer]
-
-                cluster_1, cluster_2 = wedge_split(
-                    self.nodes,
-                    current_partition,
-                    int(possible_node),
-                    center_node,
-                    metric,
-                )
-
-                error_1: np.floating = (
-                    (
-                        np.linalg.norm(
-                            self.signal[cluster_1]
-                            - np.tile(
-                                np.mean(self.signal[cluster_1], axis=0),
-                                (
-                                    (len(cluster_1),)
-                                    if self.signal.ndim == 1
-                                    else (len(cluster_1), 1)
-                                ),
-                            )
-                        )
-                        ** 2
-                    )
-                    / self.signal.shape[0]
-                    / (self.signal.shape[1] if self.signal.ndim > 1 else 1)
-                )
-                error_2: np.floating = (
-                    (
-                        np.linalg.norm(
-                            self.signal[cluster_2]
-                            - np.tile(
-                                np.mean(self.signal[cluster_2], axis=0),
-                                (
-                                    (len(cluster_2),)
-                                    if self.signal.ndim == 1
-                                    else (len(cluster_2), 1)
-                                ),
-                            )
-                        )
-                        ** 2
-                    )
-                    / self.signal.shape[0]
-                    / (self.signal.shape[1] if self.signal.ndim > 1 else 1)
-                )
-                error_new: np.floating = error_1 + error_2
-
-                if error_new <= max_error:
-                    t_0 = time.perf_counter()
-                    if len(self.center_nodes) == self.partition_size + 1:
-                        self.center_nodes[-1] = int(possible_node)
-                    else:
-                        self.center_nodes.append(int(possible_node))
-
-                    self.partition[max_error_index] = cluster_1
-
-                    self.partition[self.partition_size] = cluster_2
-
-                    self.mean_signal[max_error_index] = np.mean(
-                        self.signal[cluster_1], axis=0
-                    )
-                    self.mean_signal[self.partition_size] = np.mean(
-                        self.signal[cluster_2], axis=0
-                    )
-
-                    self.wavelet_coefficients[self.partition_size, :, 0] = (
-                        self.mean_signal[max_error_index] - current_mean_signal
-                    )
-                    self.wavelet_coefficients[self.partition_size, :, 1] = (
-                        self.mean_signal[self.partition_size] - current_mean_signal
-                    )
-
-                    self.block_sizes[self.partition_size] = [
-                        len(cluster_1),
-                        len(cluster_2),
                     ]
-                    t_1 = time.perf_counter()
+                )
+            ),
+            initial=self.partition_size,
+        ) as pbar:
+            while max_error > tolerance and self.partition_size < np.min(
+                [
+                    self.max_partition_size,
+                    max_partition_size if max_partition_size is not None else np.inf,
+                ]
+            ):
+                center_node: int = self.center_nodes[max_error_index]
+                current_mean_signal: npt.NDArray = self.mean_signal[max_error_index]
+                current_partition: npt.NDArray[np.integer] = self.partition[
+                    max_error_index
+                ]
+                center_index: int = int(
+                    np.where(current_partition == center_node)[0][0]
+                )
 
-                    self.error[max_error_index] = error_1
-                    self.error[self.partition_size] = error_2
-                    max_error = error_new
+                if method is None:
+                    method = "RA"
 
-            t_0 = time.perf_counter()
-            max_error = np.max(list(self.error.values()))
-            max_error_index = list(self.error.keys())[
-                list(self.error.values()).index(max_error)
-            ]
-            t_1 = time.perf_counter()
+                S: int
+                new_node_range: npt.NDArray
 
-            self.partition_size += 1
+                match method:
+                    case "FA":
+                        S = len(current_partition)
+                        new_node_range = current_partition.copy()
+                    case "MD":
+                        S = 1
+                        new_node_range = current_partition[
+                            np.argmax(
+                                center_distance(
+                                    self.nodes.coordinates_from_indices(
+                                        current_partition
+                                    ),
+                                    center_index,
+                                    metric,
+                                ),
+                                axis=0,
+                                keepdims=True,
+                            )
+                        ]
+                        next_max = max([len(p) for p in self.partition.values()])
+                        next_min = min([len(p) for p in self.partition.values()])
+                        if previous_max != next_max:
+                            print(f"\nMax partition size: {next_max}")
+                            previous_max = next_max
+                        if previous_min != next_min:
+                            print(f"\nMin partition size: {next_min}")
+                            previous_min = next_min
+                        if len(current_partition) == 1:
+                            print("Current partition is a single pixel!")
 
-        if self.partition_size < self.max_partition_size:
-            self.mean_signal = self.mean_signal[: self.partition_size]
-            self.wavelet_coefficients = self.wavelet_coefficients[: self.partition_size]
+                    case "KC":
+                        if method_parameter is None:
+                            method_parameter = 2
+                        S = min([method_parameter, len(current_partition)])
+                        node_range: list[int] = j_centers(
+                            self.nodes.coordinates_from_indices(current_partition),
+                            method_parameter,
+                            input_centers=center_index,
+                            metric=metric,
+                        )[0]
+                        new_node_range = current_partition[node_range]
+                    case "RA":
+                        rng = np.random.default_rng(seed=1)
+                        if method_parameter is None:
+                            method_parameter = 2
+                        current_partition_size: int = len(current_partition)
+                        S = (
+                            method_parameter
+                            if method_parameter < current_partition_size
+                            else current_partition_size
+                        )
+                        new_node_range = rng.choice(
+                            current_partition,
+                            size=S,
+                            replace=False,
+                        )
+
+                for possible_node in new_node_range:
+                    cluster_1: npt.NDArray[np.integer]
+                    cluster_2: npt.NDArray[np.integer]
+
+                    cluster_1, cluster_2 = wedge_split(
+                        self.nodes,
+                        current_partition,
+                        int(possible_node),
+                        center_node,
+                        metric,
+                    )
+
+                    error_1: np.floating = (
+                        (
+                            np.linalg.norm(
+                                self.signal[cluster_1]
+                                - np.tile(
+                                    np.mean(self.signal[cluster_1], axis=0),
+                                    (
+                                        (len(cluster_1),)
+                                        if self.signal.ndim == 1
+                                        else (len(cluster_1), 1)
+                                    ),
+                                )
+                            )
+                            ** 2
+                        )
+                        / self.signal.shape[0]
+                        / (self.signal.shape[1] if self.signal.ndim > 1 else 1)
+                    )
+                    error_2: np.floating = (
+                        (
+                            np.linalg.norm(
+                                self.signal[cluster_2]
+                                - np.tile(
+                                    np.mean(self.signal[cluster_2], axis=0),
+                                    (
+                                        (len(cluster_2),)
+                                        if self.signal.ndim == 1
+                                        else (len(cluster_2), 1)
+                                    ),
+                                )
+                            )
+                            ** 2
+                        )
+                        / self.signal.shape[0]
+                        / (self.signal.shape[1] if self.signal.ndim > 1 else 1)
+                    )
+                    error_new: np.floating = error_1 + error_2
+
+                    if error_new <= max_error:
+                        t_0 = time.perf_counter()
+                        if len(self.center_nodes) == self.partition_size + 1:
+                            self.center_nodes[-1] = int(possible_node)
+                        else:
+                            self.center_nodes.append(int(possible_node))
+
+                        self.partition[max_error_index] = cluster_1
+
+                        self.partition[self.partition_size] = cluster_2
+
+                        self.mean_signal[max_error_index] = np.mean(
+                            self.signal[cluster_1], axis=0
+                        )
+                        self.mean_signal[self.partition_size] = np.mean(
+                            self.signal[cluster_2], axis=0
+                        )
+
+                        self.wavelet_coefficients[self.partition_size, :, 0] = (
+                            self.mean_signal[max_error_index] - current_mean_signal
+                        )
+                        self.wavelet_coefficients[self.partition_size, :, 1] = (
+                            self.mean_signal[self.partition_size] - current_mean_signal
+                        )
+
+                        self.block_sizes[self.partition_size] = [
+                            len(cluster_1),
+                            len(cluster_2),
+                        ]
+                        t_1 = time.perf_counter()
+
+                        self.error[max_error_index] = error_1
+                        self.error[self.partition_size] = error_2
+                        max_error = error_new
+
+                t_0 = time.perf_counter()
+                max_error = np.max(list(self.error.values()))
+                max_error_index = list(self.error.keys())[
+                    list(self.error.values()).index(max_error)
+                ]
+                t_1 = time.perf_counter()
+
+                self.partition_size += 1
+                pbar.update(1)
+
+            if (
+                max_partition_size is None
+                and self.partition_size < self.max_partition_size
+            ):
+                self.mean_signal = self.mean_signal[: self.partition_size]
+                self.wavelet_coefficients = self.wavelet_coefficients[
+                    : self.partition_size
+                ]
+            try:
+                print(f"Max partition size: {next_max}")
+                print(f"Min partition size: {next_min}")
+            except:
+                pass
 
     def wedgelet_decode(
         self, metric: float | None = None
@@ -403,7 +454,7 @@ def j_centers(
     input_center: list[int]
     if input_centers is None:
         rng = np.random.default_rng(seed=1)
-        input_center = [rng.integers(N)]
+        input_center = [int(rng.integers(N))]
     elif isinstance(input_centers, int):
         input_center = [input_centers]
     else:
@@ -416,14 +467,14 @@ def j_centers(
     centers: list[int] = [-1 for _ in range(n_clusters)]
     centers[: len(input_center)] = input_center
 
-    for j in range(n_clusters):
+    for j in range(n_clusters - 1):
         distances[j] = center_distance(coords, centers[j], metric)
-        if j >= len(input_center) and j != n_clusters - 1:
+        if j >= len(input_center) - 1:
             centers[j + 1] = greedy_search_subset[
-                np.argmax(np.min(distances[:j, greedy_search_subset], axis=0))
+                np.argmax(np.min(distances[: j + 1, greedy_search_subset], axis=0))
             ]
-
-    return centers, distances.min(axis=0)
+    distances[-1] = center_distance(coords, centers[-1], metric)
+    return centers, distances.argmin(axis=0)
 
 
 def wedge_split(
@@ -433,17 +484,19 @@ def wedge_split(
     center_2: int,
     metric: float | None = None,
 ) -> tuple[npt.NDArray[np.integer], npt.NDArray[np.integer]]:
-    node_coords: npt.NDArray = nodes.asarray()
+    new_indices: npt.NDArray = np.asarray(indices)
+    node_coords: npt.NDArray = nodes.coordinates_from_indices(new_indices)
+
+    new_center_1: int = int(np.nonzero(new_indices == center_1)[0][0])
+    new_center_2: int = int(np.nonzero(new_indices == center_2)[0][0])
 
     c_1: npt.NDArray[np.floating] = np.heaviside(
-        center_distance(node_coords, center_1, metric)
-        - center_distance(node_coords, center_2, metric),
+        center_distance(node_coords, new_center_1, metric)
+        - center_distance(node_coords, new_center_2, metric),
         0,
     )
-    c_2: npt.NDArray[np.floating] = np.zeros_like(c_1)
-    c_2[indices] = np.ones(len(indices))
 
-    return np.nonzero(c_1 * c_2)[0], np.nonzero((1 - c_1) * c_2)[0]
+    return new_indices[np.nonzero(c_1)[0]], new_indices[np.nonzero((1 - c_1))[0]]
 
 
 def to_signal(image: Image.Image) -> tuple[NodesGrid, npt.NDArray, int, int]:
@@ -456,7 +509,7 @@ def grid_to_signal(img_array: npt.NDArray) -> tuple[NodesGrid, npt.NDArray, int,
     if dims == 2:
         return (
             NodesGrid(img_array.shape[1], img_array.shape[0]),
-            img_array.flatten(order="F"),
+            img_array.flatten(),
             img_array.shape[1],
             img_array.shape[0],
         )
@@ -505,7 +558,7 @@ def _main(test: int) -> None:
         case 4:
             with Image.open("tests/easy.bmp") as im:
                 nodes, signal, _, _ = to_signal(im)
-            BinaryWedgeParitioningTree(nodes, signal, (4, 3), 10)
+            DebugBinaryWedgeParitioningTree(nodes, signal, (4, 3), 10)
         case 5:
             print(
                 center_distance(
@@ -517,7 +570,7 @@ def _main(test: int) -> None:
         case 7:
             with Image.open("tests/easy.bmp") as im:
                 nodes, signal, width, height = to_signal(im)
-            BWP = BinaryWedgeParitioningTree(nodes, signal, (2, 2), 20)
+            BWP = DebugBinaryWedgeParitioningTree(nodes, signal, (2, 2), 20)
             BWP.wedgelet_encode()
             # Image.fromarray(from_signal(BWP.mean_signal, 4, 3), mode="RGB").show()
         case 8:
@@ -526,7 +579,36 @@ def _main(test: int) -> None:
 
             print("Starting signal translation")
             t_0 = time.perf_counter()
-            BWP = BinaryWedgeParitioningTree(nodes, signal, 1, 50)
+            BWP = DebugBinaryWedgeParitioningTree(nodes, signal, 1, 50)
+            t_1 = time.perf_counter()
+            print(f"Initialization time: {t_1-t_0:.3e} s.\n")
+
+            print("Starting encoding")
+            t_0 = time.perf_counter()
+            BWP.wedgelet_encode(method_parameter=16)
+            t_1 = time.perf_counter()
+            print(f"\nEncoding time: {t_1-t_0:.3e} s.\n")
+
+            print("Starting decoding")
+            t_0 = time.perf_counter()
+            s, P = BWP.wedgelet_decode()
+            t_1 = time.perf_counter()
+            print(f"Decoding time: {t_1-t_0:.3e} s.\n")
+
+            Image.fromarray(from_signal(s, width, height), mode="RGB").show()
+            # np.savez_compressed(
+            #     "test.npz",
+            #     s=BWP.mean_signal,
+            #     centers=np.array(list(P.keys())),
+            #     metric=2,
+            # )
+        case 9:
+            with Image.open("tests/gradient.jpg") as im:
+                nodes, signal, width, height = to_signal(im)
+
+            print("Starting signal translation")
+            t_0 = time.perf_counter()
+            BWP = DebugBinaryWedgeParitioningTree(nodes, signal, 1, 16)
             t_1 = time.perf_counter()
             print(f"Initialization time: {t_1-t_0:.3e} s.\n")
 
@@ -542,14 +624,55 @@ def _main(test: int) -> None:
             t_1 = time.perf_counter()
             print(f"Decoding time: {t_1-t_0:.3e} s.\n")
 
+            Image.fromarray(from_signal(s, width, height), mode="L").show()
+            # np.savez_compressed(
+            #     "test2.npz",
+            #     s=BWP.mean_signal,
+            #     centers=np.array(list(P.keys())),
+            #     metric=2,
+            # )
+        case 10:
+            with Image.open("tests/attractor.bmp") as im:
+                nodes, signal, width, height = to_signal(im)
+
+            print("Starting signal translation")
+            t_0 = time.perf_counter()
+            BWP = DebugBinaryWedgeParitioningTree(nodes, signal, 1, 100_000)
+            t_1 = time.perf_counter()
+            print(f"Initialization time: {t_1-t_0:.3e} s.\n")
+
+            print("Starting encoding")
+            t_0 = time.perf_counter()
+            BWP.wedgelet_encode(method_parameter=16, tolerance=1e-13)
+            t_1 = time.perf_counter()
+            print(f"\nEncoding time: {t_1-t_0:.3e} s.\n")
+
+            print("Starting decoding")
+            t_0 = time.perf_counter()
+            s, P = BWP.wedgelet_decode()
+            t_1 = time.perf_counter()
+            print(f"Decoding time: {t_1-t_0:.3e} s.\n")
+
             Image.fromarray(from_signal(s, width, height), mode="RGB").show()
-            np.savez_compressed(
-                "test2.npz",
-                s=BWP.mean_signal,
-                centers=np.array(list(P.keys())),
-                metric=2,
-            )
+            # np.savez_compressed(
+            #     "test3.npz",
+            #     s=BWP.mean_signal,
+            #     centers=np.array(list(P.keys())),
+            #     metric=2,
+            # )
+        case 11:
+            nodes = NodesGrid(6, 7)
+            indices: list[int] = [3, 4, 5, 9, 10, 11]
+            coords: npt.NDArray = nodes.coordinates_from_indices(indices)
+            print(j_centers(coords, 2))
+        case 12:
+            with Image.open("tests/memorial.JPG") as im:
+                nodes, signal, width, height = to_signal(im)
+            BWP = DebugBinaryWedgeParitioningTree(nodes, signal, 32, 10000)
+            BWP.wedgelet_encode(method="KC", method_parameter=4)
+            s, P = BWP.wedgelet_decode()
+            Image.fromarray(from_signal(s, width, height), mode="RGB").show()
 
 
 if __name__ == "__main__":
-    _main(8)
+    _main(12)
