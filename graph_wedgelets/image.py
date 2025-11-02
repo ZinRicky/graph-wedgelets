@@ -1,7 +1,6 @@
 # Necessary libraries
 import numpy as np
 from PIL import Image
-from copy import deepcopy
 
 # Typing libraries
 import numpy.typing as npt
