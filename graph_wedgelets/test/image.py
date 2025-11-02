@@ -266,6 +266,8 @@ class DebugBinaryWedgeParitioningTree:
                                 keepdims=True,
                             )
                         ]
+                        if not (set(new_node_range) <= set(current_partition)):
+                            raise Exception("Porco cane!")
                         next_max = max([len(p) for p in self.partition.values()])
                         next_min = min([len(p) for p in self.partition.values()])
                         if previous_max != next_max:
@@ -353,6 +355,9 @@ class DebugBinaryWedgeParitioningTree:
                         / (self.signal.shape[1] if self.signal.ndim > 1 else 1)
                     )
                     error_new: np.floating = error_1 + error_2
+
+                    print(f"{error_1=}")
+                    print(f"{error_2=}")
 
                     if error_new <= max_error:
                         t_0 = time.perf_counter()
@@ -666,11 +671,12 @@ def _main(test: int) -> None:
             coords: npt.NDArray = nodes.coordinates_from_indices(indices)
             print(j_centers(coords, 2))
         case 12:
-            with Image.open("tests/memorial.JPG") as im:
+            with Image.open("tests/church.jpg") as im:
                 nodes, signal, width, height = to_signal(im)
-            BWP = DebugBinaryWedgeParitioningTree(nodes, signal, 32, 10000)
-            BWP.wedgelet_encode(method="KC", method_parameter=4)
+            BWP = DebugBinaryWedgeParitioningTree(nodes, signal, 1, 500)
+            BWP.wedgelet_encode(method="RA", method_parameter=2, tolerance=0)
             s, P = BWP.wedgelet_decode()
+            print(s)
             Image.fromarray(from_signal(s, width, height), mode="RGB").show()
 
 
