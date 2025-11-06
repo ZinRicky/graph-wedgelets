@@ -6,15 +6,16 @@ build-backend = "setuptools.build_meta"
 name = "graph_wedgelets"
 version = "0.0.1"
 authors = [
-  { name="Riccardo Cazzin", email="riccardo.cazzin@studenti.unipd.it" },
+  { name = "Riccardo Cazzin", email = "riccardo.cazzin@studenti.unipd.it" },
+  { name = "Wolfgang Erb", email = "wolfgang.erb@unipd.it" },
 ]
 description = "Image and graph compression using graph wedgelets"
 readme = "README.md"
 requires-python = ">=3.13"
 classifiers = [
-    "Programming Language :: Python :: 3",
-    "Operating System :: OS Independent",
-    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)"
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
 ]
 license = "GPL-3.0-or-later"
 license-files = ["LICEN[CS]E*"]
