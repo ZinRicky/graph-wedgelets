@@ -300,7 +300,7 @@ class BinaryWedgePartitioningTree:
                 )
                 error_new: np.floating = error_1 + error_2
 
-                if error_new < max_error:
+                if error_new <= max_error:
                     if len(self.center_nodes) == self.partition_size + 1:
                         self.center_nodes[-1] = int(possible_node)
                     else:
