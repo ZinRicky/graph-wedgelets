@@ -13,7 +13,7 @@ class NodesGrid:
         self.width: int = width
         self.height: int = height
         self.shape: tuple[int, int] = (self.width, self.height)
-        self.array: npt.NDArray | None = None
+        self.array: npt.NDArray[np.integer] | None = None
 
     def __getitem__(self, index: int | slice):
         if isinstance(index, int):
@@ -44,7 +44,7 @@ class NodesGrid:
     def __repr__(self):
         return f"<NodesGrid(width={self.width}, height={self.height}, memoized_array={self.array is not None})>"
 
-    def asarray(self) -> npt.NDArray:
+    def asarray(self) -> npt.NDArray[np.integer]:
         if self.array is None:
             x: npt.NDArray[np.integer]
             y: npt.NDArray[np.integer]
@@ -52,19 +52,21 @@ class NodesGrid:
             self.array = np.column_stack((x.flatten(), y.flatten()))
         return self.array
 
-    def coordinates_from_indices(self, indices: npt.ArrayLike) -> npt.NDArray:
+    def coordinates_from_indices(
+        self, indices: npt.ArrayLike
+    ) -> npt.NDArray[np.integer]:
         return self.asarray()[np.asarray(indices)]
 
 
 class BWPExport(TypedDict):
-    center_nodes: npt.NDArray
-    next_nodes: npt.NDArray
+    center_nodes: npt.NDArray[np.integer]
+    next_nodes: npt.NDArray[np.integer]
     grid_width: int
     grid_height: int
     block_horizontal_size: int
     block_vertical_size: int
     initial_partition_size: int
-    mean_signal: npt.NDArray
+    mean_signal: npt.NDArray[np.floating]
     metric: float
 
 
@@ -72,7 +74,7 @@ class BinaryWedgePartitioningTree:
     def __init__(
         self,
         nodes: NodesGrid,
-        signal: npt.NDArray,
+        signal: npt.NDArray[np.floating],
         n_blocks: int | Iterable[int] | None,
         max_partition_size: int,
     ) -> None:
@@ -113,11 +115,11 @@ class BinaryWedgePartitioningTree:
             n_blocks_vertical,
         )
         self.center_nodes: list[int] = (
-            (centers @ np.array([1, self.nodes.width], dtype=np.int64))
+            np.sort(centers @ np.array([1, self.nodes.width], dtype=np.int64))
+            .astype(np.integer)
             .flatten()
             .tolist()
         )
-        self.center_nodes.sort()
         self.initial_center_nodes: list[int] = self.center_nodes.copy()
         self.initial_partition_size: int = self.partition_size
         self.next_nodes: list[int] = []
@@ -133,7 +135,7 @@ class BinaryWedgePartitioningTree:
             self.partition.copy()
         )
 
-        self.mean_signal: npt.NDArray
+        self.mean_signal: npt.NDArray[np.floating]
         if signal.ndim == 1:
             self.mean_signal = np.zeros(self.max_partition_size)
             for i, block in self.partition.items():
@@ -143,7 +145,7 @@ class BinaryWedgePartitioningTree:
             for i, block in self.partition.items():
                 self.mean_signal[i] = signal[block].mean(axis=0)
 
-        self.wavelet_coefficients: npt.NDArray
+        self.wavelet_coefficients: npt.NDArray[np.floating]
         if signal.ndim == 1:
             self.wavelet_coefficients = np.zeros((self.max_partition_size, 1, 2))
         else:
@@ -161,7 +163,7 @@ class BinaryWedgePartitioningTree:
         if signal.ndim == 2:
             coeff /= signal.shape[1]
 
-        self.error: npt.NDArray = np.zeros(self.max_partition_size)
+        self.error: npt.NDArray[np.floating] = np.zeros(self.max_partition_size)
         if signal.ndim == 1:
             self.error[: self.initial_partition_size] = [
                 np.linalg.norm(signal[block] - self.mean_signal[i]) ** 2 / coeff
@@ -179,7 +181,7 @@ class BinaryWedgePartitioningTree:
 
     def wedgelet_encode(
         self,
-        signal: npt.NDArray,
+        signal: npt.NDArray[np.floating],
         method: Literal["FA", "MD", "KC", "RA"] | None = None,
         method_parameter: int | None = None,
         tolerance: float = 1e-3,
@@ -198,7 +200,9 @@ class BinaryWedgePartitioningTree:
         ):
             self.next_nodes.append(max_error_index)
             center_node: int = self.center_nodes[max_error_index]
-            current_mean_signal: npt.NDArray = self.mean_signal[max_error_index]
+            current_mean_signal: npt.NDArray[np.floating] = self.mean_signal[
+                max_error_index
+            ]
             current_partition: npt.NDArray[np.integer] = self.partition[max_error_index]
             center_index: int = int(np.where(current_partition == center_node)[0][0])
 
@@ -206,7 +210,7 @@ class BinaryWedgePartitioningTree:
                 method = "RA"
 
             S: int
-            new_node_range: npt.NDArray
+            new_node_range: npt.NDArray[np.integer]
 
             match method:
                 case "FA":
@@ -231,7 +235,7 @@ class BinaryWedgePartitioningTree:
                     S = min([method_parameter, len(current_partition) - 1])
                     node_range: list[int] = j_centers(
                         self.nodes.coordinates_from_indices(current_partition),
-                        method_parameter,
+                        S,
                         input_centers=center_index,
                         metric=metric,
                     )[0]
@@ -244,10 +248,14 @@ class BinaryWedgePartitioningTree:
                     S = (
                         method_parameter
                         if method_parameter < current_partition_size
-                        else current_partition_size
+                        else current_partition_size - 1
                     )
                     new_node_range = rng.choice(
-                        current_partition, size=S, replace=False
+                        np.asarray(current_partition)[
+                            np.asarray(current_partition) != center_node
+                        ],
+                        size=S,
+                        replace=False,
                     )
 
             for idx, possible_node in enumerate(new_node_range):
@@ -343,7 +351,7 @@ class BinaryWedgePartitioningTree:
             self.wavelet_coefficients = self.wavelet_coefficients[: self.partition_size]
 
     def export(self) -> BWPExport:
-        new_center_nodes: npt.NDArray = np.asarray(self.center_nodes)
+        new_center_nodes: npt.NDArray[np.integer] = np.asarray(self.center_nodes)
         max_node: np.integer = np.max(new_center_nodes)
 
         cn_export_type: type = (
@@ -356,7 +364,7 @@ class BinaryWedgePartitioningTree:
             )
         )
 
-        new_next_nodes: npt.NDArray = np.asarray(self.next_nodes)
+        new_next_nodes: npt.NDArray[np.integer] = np.asarray(self.next_nodes)
         max_next_node: np.integer = np.max(new_next_nodes)
         nn_export_type: type = (
             np.uint8
@@ -398,14 +406,14 @@ class BWPDecoder:
         grid_height: int,
         block_horizontal_size: int,
         block_vertical_size: int,
-        mean_signal: npt.NDArray,
+        mean_signal: npt.NDArray[np.floating],
         initial_partition_size: int,
         metric: float | None = None,
     ) -> None:
         self.nodes: NodesGrid = NodesGrid(grid_width, grid_height)
         self.center_nodes: npt.NDArray[np.integer] = center_nodes.copy()
         self.next_nodes: npt.NDArray[np.integer] = next_nodes.copy()
-        self.mean_signal: npt.NDArray = mean_signal.copy()
+        self.mean_signal: npt.NDArray[np.floating] = mean_signal.copy()
         self.initial_partition_size: int = initial_partition_size
         self.partition: dict[int, npt.NDArray[np.integer]] = grid_partition(
             self.center_nodes[:initial_partition_size].flatten().tolist(),
@@ -419,15 +427,15 @@ class BWPDecoder:
 
     def wedgelet_decode(
         self,
-    ) -> tuple[npt.NDArray, dict[int, npt.NDArray[np.integer]]]:
+    ) -> tuple[npt.NDArray[np.floating], dict[int, npt.NDArray[np.integer]]]:
         if not self._is_decoded:
             for i, node in enumerate(self.next_nodes):
                 current_partition: npt.NDArray[np.integer] = self.partition[int(node)]
                 old_node: int = self.center_nodes[node]
                 new_node: int = self.center_nodes[i + self.initial_partition_size]
 
-                cluster_1: npt.NDArray
-                cluster_2: npt.NDArray
+                cluster_1: npt.NDArray[np.integer]
+                cluster_2: npt.NDArray[np.integer]
                 cluster_1, cluster_2 = wedge_split(
                     self.nodes,
                     current_partition,
@@ -439,7 +447,7 @@ class BWPDecoder:
                 self.partition[int(node)] = cluster_1
                 self.partition[i + self.initial_partition_size] = cluster_2
 
-            signal: npt.NDArray
+            signal: npt.NDArray[np.floating]
             if self.mean_signal.ndim == 1:
                 signal = np.zeros(self.nodes.width * self.nodes.height)
                 for i, block in self.partition.items():
@@ -451,7 +459,7 @@ class BWPDecoder:
                 for i, block in self.partition.items():
                     signal[block] = np.tile(self.mean_signal[i], (block.shape[0], 1))
 
-            self.signal: npt.NDArray = signal
+            self.signal: npt.NDArray[np.floating] = signal
             self._is_decoded = True
 
         return self.signal, self.partition
@@ -533,10 +541,10 @@ def grid_partition(
 
 
 def center_distance(
-    coords: npt.NDArray,
+    coords: npt.NDArray[np.integer],
     center_index: int,
     metric: float | None = None,
-) -> npt.NDArray:
+) -> npt.NDArray[np.floating]:
     vectors: npt.NDArray[np.floating] = coords - coords[center_index]
 
     if metric is None or metric == 2:
@@ -550,12 +558,12 @@ def center_distance(
 
 
 def j_centers(
-    coords: npt.NDArray,
+    coords: npt.NDArray[np.integer],
     n_clusters: int,
     greedy_search_subset: list[int] | None = None,
     input_centers: list[int] | int | None = None,
     metric: float | None = None,
-) -> tuple[list[int], npt.NDArray]:
+) -> tuple[list[int], npt.NDArray[np.integer]]:
     N: int = coords.shape[0]
 
     input_center: list[int]
@@ -570,7 +578,7 @@ def j_centers(
     if greedy_search_subset is None:
         greedy_search_subset = list(range(N))
 
-    distances: npt.NDArray = np.zeros((n_clusters, N))
+    distances: npt.NDArray[np.floating] = np.zeros((n_clusters, N))
     centers: list[int] = [-1 for _ in range(n_clusters)]
     centers[: len(input_center)] = input_center
 
@@ -591,11 +599,11 @@ def wedge_split(
     center_2: int,
     metric: float | None = None,
 ) -> tuple[npt.NDArray[np.integer], npt.NDArray[np.integer]]:
-    new_indices: npt.NDArray = np.asarray(indices)
-    node_coords: npt.NDArray = nodes.coordinates_from_indices(new_indices)
+    new_indices: npt.NDArray[np.integer] = np.asarray(indices)
+    node_coords: npt.NDArray[np.integer] = nodes.coordinates_from_indices(new_indices)
 
-    new_center_1: int = int(np.nonzero(new_indices == center_1)[0][0])
-    new_center_2: int = int(np.nonzero(new_indices == center_2)[0][0])
+    new_center_1: int = int(np.flatnonzero(new_indices == center_1)[0])
+    new_center_2: int = int(np.flatnonzero(new_indices == center_2)[0])
 
     c_1: npt.NDArray[np.floating] = np.heaviside(
         center_distance(node_coords, new_center_1, metric)
@@ -603,14 +611,18 @@ def wedge_split(
         0,
     )
 
-    return new_indices[np.nonzero(c_1)[0]], new_indices[np.nonzero((1 - c_1))[0]]
+    return new_indices[np.flatnonzero(c_1)], new_indices[np.flatnonzero(1 - c_1)]
 
 
-def to_signal(image: Image.Image) -> tuple[NodesGrid, npt.NDArray, int, int]:
+def to_signal(
+    image: Image.Image,
+) -> tuple[NodesGrid, npt.NDArray[np.floating], int, int]:
     return grid_to_signal(np.asarray(image))
 
 
-def grid_to_signal(img_array: npt.NDArray) -> tuple[NodesGrid, npt.NDArray, int, int]:
+def grid_to_signal(
+    img_array: npt.NDArray[np.floating],
+) -> tuple[NodesGrid, npt.NDArray[np.floating], int, int]:
     dims: int = np.ndim(img_array)
 
     if dims == 2:
@@ -633,7 +645,9 @@ def grid_to_signal(img_array: npt.NDArray) -> tuple[NodesGrid, npt.NDArray, int,
     raise ValueError("Unsupported image format.")
 
 
-def from_signal(signal: npt.NDArray, width: int, height: int) -> npt.NDArray:
+def from_signal(
+    signal: npt.NDArray[np.floating], width: int, height: int
+) -> npt.NDArray[np.floating]:
     if signal.ndim == 1:
         return signal.reshape((height, width))
     elif signal.ndim == 2:
