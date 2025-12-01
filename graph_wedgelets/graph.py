@@ -6,7 +6,14 @@ from copy import deepcopy
 
 # Typing libraries
 import numpy.typing as npt
-from typing import Literal
+from typing import Literal, TypedDict
+
+
+class BWPExport(TypedDict):
+    center_nodes: npt.NDArray[np.integer]
+    next_nodes: npt.NDArray[np.integer]
+    initial_partition_size: int
+    mean_signal: npt.NDArray[np.floating]
 
 
 class BinaryWedgePartitioningTree:
@@ -47,11 +54,7 @@ class BinaryWedgePartitioningTree:
 
         _auto_centers: bool = False
 
-        if initial_partition_size is None and center_nodes is None:
-            raise ValueError(
-                "At least one between 'initial_partition_size' and 'center_nodes' should not be None."
-            )
-        elif center_nodes is not None:
+        if center_nodes is not None:
             if np.asarray(center_nodes).shape[0] >= max_partition_size:
                 self.center_nodes = (
                     np.asarray(center_nodes, dtype=np.int64)
@@ -73,14 +76,19 @@ class BinaryWedgePartitioningTree:
             _auto_centers = True
 
         if _auto_centers:
-            _partition_method: Literal["betweenness", "closeness", "random"]
+            _partition_method: Literal["betweenness", "closeness", "random", "pagerank"]
             if initial_partition_method is None:
                 _partition_method = "random"
-            elif initial_partition_method in ("betweenness", "closeness", "random"):
+            elif initial_partition_method in (
+                "betweenness",
+                "closeness",
+                "random",
+                "pagerank",
+            ):
                 _partition_method = initial_partition_method
             else:
                 raise ValueError(
-                    "Unrecognized partition method. Supported methods: {'betweenness', 'closeness', 'random'}."
+                    "Unrecognized partition method. Supported methods: {'betweenness', 'closeness', 'pagerank', 'random'}."
                 )
 
             if use_leiden or initial_partition_size is None:
@@ -106,6 +114,8 @@ class BinaryWedgePartitioningTree:
                             cluster.vs["score"] = cluster.betweenness()
                         case "closeness":
                             cluster.vs["score"] = cluster.closeness()
+                        case "pagerank":
+                            cluster.vs["score"] = cluster.pagerank()
 
                 if initial_partition_size is None:
                     for cluster in clusters:
@@ -152,6 +162,8 @@ class BinaryWedgePartitioningTree:
                         _graph.vs["score"] = _graph.betweenness()
                     case "closeness":
                         _graph.vs["score"] = _graph.closeness()
+                    case "pagerank":
+                        _graph.vs["score"] = _graph.pagerank()
 
                 global_init_i: int = 0
 
@@ -206,7 +218,7 @@ class BinaryWedgePartitioningTree:
             else (self.max_partition_size, signal.shape[1], 2)
         )
         self.wavelet_coefficients[: self.initial_partition_size, :, 0] = (
-            self.mean_signal[: self.initial_partition_size]
+            self.mean_signal[: self.initial_partition_size].reshape((-1, 1))
         )
 
         self.error: npt.NDArray[np.floating] = np.zeros(self.max_partition_size)
@@ -269,6 +281,7 @@ class BinaryWedgePartitioningTree:
                 max_partition_size if max_partition_size is not None else np.inf,
             ]
         ):
+            safeguard: bool = False
             self.next_nodes.append(max_error_index)
             center_node: int = self.center_nodes[max_error_index]
             current_mean_signal: npt.NDArray[np.floating] = self.mean_signal[
@@ -297,7 +310,7 @@ class BinaryWedgePartitioningTree:
             sanitized_parameter: int = (
                 _parameter
                 if _parameter < len(current_subgraph.vs)
-                else len(current_subgraph.vs) - 1
+                else len(current_subgraph.vs)
             )
             new_node_range: npt.NDArray[np.integer]
 
@@ -306,11 +319,16 @@ class BinaryWedgePartitioningTree:
                     graph_encode_rng: np.random.Generator = np.random.default_rng(
                         seed=1
                     )
+                    graph_rng_list: npt.NDArray[np.integer] = np.arange(
+                        len(current_subgraph.vs)
+                    )[np.arange(len(current_subgraph.vs)) != center_index]
                     new_node_range = graph_encode_rng.choice(
-                        np.arange(len(current_subgraph.vs))[
-                            np.arange(len(current_subgraph.vs)) != center_index
-                        ],
-                        sanitized_parameter,
+                        graph_rng_list,
+                        (
+                            sanitized_parameter
+                            if sanitized_parameter < graph_rng_list.shape[0]
+                            else graph_rng_list.shape[0]
+                        ),
                         replace=False,
                     )
                 case "fully_adaptive":
@@ -327,11 +345,14 @@ class BinaryWedgePartitioningTree:
                         keepdims=True,
                     )
                 case "j_centers":
-                    new_node_range = j_centers(
+                    j_centers_centers: npt.NDArray[np.integer] = j_centers(
                         current_subgraph,
                         sanitized_parameter,
                         input_centers=center_index,
-                    )[0][1:]
+                    )[0]
+                    new_node_range = j_centers_centers[
+                        j_centers_centers != center_index
+                    ]
                 case "closeness":
                     current_closeness: npt.NDArray[np.floating] = np.asarray(
                         current_subgraph.closeness()
@@ -363,7 +384,7 @@ class BinaryWedgePartitioningTree:
                         :sanitized_parameter
                     ]
 
-            for possible_node in new_node_range:
+            for idx, possible_node in enumerate(new_node_range):
                 new_split: npt.NDArray[np.integer] = wedge_split(
                     current_subgraph, center_index, possible_node
                 )
@@ -414,6 +435,7 @@ class BinaryWedgePartitioningTree:
                 error_new: np.floating = error_1 + error_2
 
                 if error_new <= max_error:
+                    safeguard = True
                     if len(self.center_nodes) == self.partition_size + 1:
                         self.center_nodes[-1] = current_subgraph_original[
                             int(possible_node)
@@ -444,15 +466,144 @@ class BinaryWedgePartitioningTree:
                     self.error[self.partition_size] = error_2
                     max_error = error_new
 
+            if not safeguard:
+                self.center_nodes.append(current_subgraph_original[int(possible_node)])
+
+                current_partition[cluster_1] = max_error_index
+                current_partition[cluster_2] = self.partition_size
+
+                self.mean_signal[max_error_index] = np.mean(signal[cluster_1], axis=0)
+                self.mean_signal[self.partition_size] = np.mean(
+                    signal[cluster_2], axis=0
+                )
+
+                self.wavelet_coefficients[self.partition_size, :, 0] = (
+                    self.mean_signal[max_error_index] - current_mean_signal
+                )
+                self.wavelet_coefficients[self.partition_size, :, 1] = (
+                    self.mean_signal[self.partition_size] - current_mean_signal
+                )
+
+                self.error[max_error_index] = error_1
+                self.error[self.partition_size] = error_2
+
             max_error_index = int(np.argmax(self.error))
             max_error = self.error[max_error_index]
 
             self.partition_size += 1
             self.partition = ig.VertexClustering(self.graph, current_partition.tolist())
 
-        if max_partition_size is None and self.partition_size < self.max_partition_size:
-            self.mean_signal = self.mean_signal[: self.partition_size]
-            self.wavelet_coefficients = self.wavelet_coefficients[: self.partition_size]
+        # if max_partition_size is None and self.partition_size < self.max_partition_size:
+        #     self.mean_signal = self.mean_signal[: self.partition_size]
+        #     self.wavelet_coefficients = self.wavelet_coefficients[: self.partition_size]
+
+    def export(self) -> BWPExport:
+        new_center_nodes: npt.NDArray[np.integer] = np.asarray(self.center_nodes)
+        max_node: np.integer = np.max(new_center_nodes)
+
+        cn_export_type: type = (
+            np.uint8
+            if max_node < np.iinfo(np.uint8).max
+            else (
+                np.uint16
+                if max_node < np.iinfo(np.uint16).max
+                else np.uint32 if max_node < np.iinfo(np.uint32).max else np.uint64
+            )
+        )
+
+        new_next_nodes: npt.NDArray[np.integer] = np.asarray(self.next_nodes)
+        _is_new_nodes_empty: bool = False
+        try:
+            max_next_node: np.integer = np.max(new_next_nodes)
+            nn_export_type: type = (
+                np.uint8
+                if max_next_node < np.iinfo(np.uint8).max
+                else (
+                    np.uint16
+                    if max_next_node < np.iinfo(np.uint16).max
+                    else (
+                        np.uint32
+                        if max_next_node < np.iinfo(np.uint32).max
+                        else np.uint64
+                    )
+                )
+            )
+        except ValueError:
+            _is_new_nodes_empty = True
+
+        return BWPExport(
+            {
+                "center_nodes": new_center_nodes.astype(cn_export_type),
+                "next_nodes": (
+                    np.array([], dtype=np.uint8)
+                    if _is_new_nodes_empty
+                    else new_next_nodes.astype(nn_export_type)
+                ),
+                "initial_partition_size": self.initial_partition_size,
+                "mean_signal": self.mean_signal[: self.partition_size],
+            }
+        )
+
+    def save_npz(self, path: str) -> None:
+        np.savez_compressed(path, **self.export())
+
+    def save(self, path: str) -> None:
+        np.savez(path, **self.export())
+
+
+class BWPDecoder:
+    def __init__(
+        self,
+        graph: ig.Graph,
+        center_nodes: npt.NDArray[np.integer],
+        next_nodes: npt.NDArray[np.integer],
+        mean_signal: npt.NDArray[np.floating],
+        initial_partition_size: int,
+        metric: float | None = None,
+    ) -> None:
+        self.graph: ig.Graph = graph
+        self.center_nodes: npt.NDArray[np.integer] = center_nodes
+        self.next_nodes: npt.NDArray[np.integer] = next_nodes
+        self.mean_signal: npt.NDArray[np.floating] = mean_signal
+        self.initial_partition_size: int = initial_partition_size
+        self.partition: npt.NDArray[np.integer] = np.argmin(
+            np.array(
+                graph.distances(target=self.center_nodes[: self.initial_partition_size])
+            ),
+            axis=1,
+        )
+        self._is_decoded: bool = False
+
+    def wedgelet_decode(
+        self,
+    ) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.integer]]:
+        if not self._is_decoded:
+            for i, node in enumerate(self.next_nodes):
+                current_partition: npt.NDArray[np.integer] = np.flatnonzero(
+                    self.partition == node
+                )
+                old_node: np.integer = self.center_nodes[node]
+                new_node: np.integer = self.center_nodes[
+                    i + self.initial_partition_size
+                ]
+
+                new_split: npt.NDArray[np.integer] = localized_wedge_split(
+                    self.graph, old_node, new_node, current_partition
+                )
+                cluster_1: npt.NDArray[np.integer] = current_partition[
+                    np.flatnonzero(1 - new_split)
+                ]
+                cluster_2: npt.NDArray[np.integer] = current_partition[
+                    np.flatnonzero(new_split)
+                ]
+
+                self.partition[cluster_1] = node
+                self.partition[cluster_2] = i + self.initial_partition_size
+
+            self.signal: npt.NDArray[np.floating] = self.mean_signal[self.partition]
+            self._is_decoded = True
+
+        return self.signal, self.partition
 
 
 def center_distance(
@@ -462,9 +613,28 @@ def center_distance(
 
 
 def wedge_split(
-    graph: ig.Graph, center_1: int, center_2: int
+    graph: ig.Graph, center_1: np.integer | int, center_2: np.integer | int
 ) -> npt.NDArray[np.integer]:
-    return np.argmin(np.array(graph.distances(target=[center_1, center_2])), axis=1)
+    return np.argmin(
+        np.array(graph.distances(target=[int(center_1), int(center_2)])), axis=1
+    )
+
+
+def localized_wedge_split(
+    graph: ig.Graph,
+    center_1: np.integer | int,
+    center_2: np.integer | int,
+    indices: npt.ArrayLike,
+) -> npt.NDArray[np.integer]:
+    return np.argmin(
+        np.array(
+            graph.distances(
+                source=np.asarray(indices).tolist(),
+                target=[int(center_1), int(center_2)],
+            )
+        ),
+        axis=1,
+    )
 
 
 def j_centers(

@@ -116,7 +116,7 @@ class BinaryWedgePartitioningTree:
         )
         self.center_nodes: list[int] = (
             np.sort(centers @ np.array([1, self.nodes.width], dtype=np.int64))
-            .astype(np.integer)
+            .astype(np.int64)
             .flatten()
             .tolist()
         )
@@ -198,6 +198,8 @@ class BinaryWedgePartitioningTree:
                 max_partition_size if max_partition_size is not None else np.inf,
             ]
         ):
+            if not self.partition_size % 25:
+                print(self.partition_size)
             self.next_nodes.append(max_error_index)
             center_node: int = self.center_nodes[max_error_index]
             current_mean_signal: npt.NDArray[np.floating] = self.mean_signal[
@@ -308,7 +310,11 @@ class BinaryWedgePartitioningTree:
                 )
                 error_new: np.floating = error_1 + error_2
 
-                if error_new <= max_error:
+                if (
+                    error_new <= max_error
+                    or idx == new_node_range.shape[0] - 1
+                    and len(self.center_nodes) == self.partition_size - 1
+                ):
                     if len(self.center_nodes) == self.partition_size + 1:
                         self.center_nodes[-1] = int(possible_node)
                     else:
@@ -346,9 +352,9 @@ class BinaryWedgePartitioningTree:
 
             self.partition_size += 1
 
-        if max_partition_size is None and self.partition_size < self.max_partition_size:
-            self.mean_signal = self.mean_signal[: self.partition_size]
-            self.wavelet_coefficients = self.wavelet_coefficients[: self.partition_size]
+        # if max_partition_size is None and self.partition_size < self.max_partition_size:
+        #     self.mean_signal = self.mean_signal[: self.partition_size]
+        #     self.wavelet_coefficients = self.wavelet_coefficients[: self.partition_size]
 
     def export(self) -> BWPExport:
         new_center_nodes: npt.NDArray[np.integer] = np.asarray(self.center_nodes)
@@ -365,27 +371,39 @@ class BinaryWedgePartitioningTree:
         )
 
         new_next_nodes: npt.NDArray[np.integer] = np.asarray(self.next_nodes)
-        max_next_node: np.integer = np.max(new_next_nodes)
-        nn_export_type: type = (
-            np.uint8
-            if max_next_node < np.iinfo(np.uint8).max
-            else (
-                np.uint16
-                if max_next_node < np.iinfo(np.uint16).max
-                else np.uint32 if max_next_node < np.iinfo(np.uint32).max else np.uint64
+        _is_new_nodes_empty: bool = False
+        try:
+            max_next_node: np.integer = np.max(new_next_nodes)
+            nn_export_type: type = (
+                np.uint8
+                if max_next_node < np.iinfo(np.uint8).max
+                else (
+                    np.uint16
+                    if max_next_node < np.iinfo(np.uint16).max
+                    else (
+                        np.uint32
+                        if max_next_node < np.iinfo(np.uint32).max
+                        else np.uint64
+                    )
+                )
             )
-        )
+        except ValueError:
+            _is_new_nodes_empty = True
 
         return BWPExport(
             {
                 "center_nodes": new_center_nodes.astype(cn_export_type),
-                "next_nodes": new_next_nodes.astype(nn_export_type),
+                "next_nodes": (
+                    np.array([], dtype=np.uint8)
+                    if _is_new_nodes_empty
+                    else new_next_nodes.astype(nn_export_type)
+                ),
                 "grid_width": self.nodes.width,
                 "grid_height": self.nodes.height,
                 "block_horizontal_size": self.block_horizontal_size,
                 "block_vertical_size": self.block_vertical_size,
                 "initial_partition_size": self.initial_partition_size,
-                "mean_signal": self.mean_signal.astype(np.uint8),
+                "mean_signal": self.mean_signal[: self.partition_size].astype(np.uint8),
                 "metric": self.metric,
             }
         )
@@ -406,14 +424,14 @@ class BWPDecoder:
         grid_height: int,
         block_horizontal_size: int,
         block_vertical_size: int,
-        mean_signal: npt.NDArray[np.floating],
+        mean_signal: npt.NDArray[np.integer],
         initial_partition_size: int,
         metric: float | None = None,
     ) -> None:
         self.nodes: NodesGrid = NodesGrid(grid_width, grid_height)
         self.center_nodes: npt.NDArray[np.integer] = center_nodes.copy()
         self.next_nodes: npt.NDArray[np.integer] = next_nodes.copy()
-        self.mean_signal: npt.NDArray[np.floating] = mean_signal.copy()
+        self.mean_signal: npt.NDArray[np.integer] = mean_signal.copy()
         self.initial_partition_size: int = initial_partition_size
         self.partition: dict[int, npt.NDArray[np.integer]] = grid_partition(
             self.center_nodes[:initial_partition_size].flatten().tolist(),
