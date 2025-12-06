@@ -198,8 +198,6 @@ class BinaryWedgePartitioningTree:
                 max_partition_size if max_partition_size is not None else np.inf,
             ]
         ):
-            if not self.partition_size % 25:
-                print(self.partition_size)
             self.next_nodes.append(max_error_index)
             center_node: int = self.center_nodes[max_error_index]
             current_mean_signal: npt.NDArray[np.floating] = self.mean_signal[
