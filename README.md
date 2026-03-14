@@ -1,4 +1,4 @@
-# Binarywedge partitioning trees on images and graphs
+# Binary wedge partitioning trees on images and graphs
 
 A Python implementation of the methods described in [Erb (2023)](https://ieeexplore.ieee.org/document/10032623).
 
