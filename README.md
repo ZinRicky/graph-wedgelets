@@ -2,7 +2,7 @@
 
 A Python implementation of the methods described in [Erb (2023)](https://ieeexplore.ieee.org/document/10032623).
 
-Some examples on images.
+Some examples on images, whose credits can be found [here](./tests/img/IMG-CREDITS.md).
 
 | Original                                                | Compressed                  |
 | ------------------------------------------------------- | --------------------------- |
